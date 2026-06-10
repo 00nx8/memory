@@ -61,6 +61,78 @@ skipped while the rest still run. The proxy is never stricter than the API.
 
 ---
 
+## Quickstart
+
+End-to-end recipe for a fresh install. Every step has a deeper reference
+later in this README; if anything in the short version is unclear, jump to
+the section called out in parentheses.
+
+1. **Clone the directory** somewhere. No external Python deps; just
+   Python 3.10+ on `PATH`.
+
+2. **Start the proxy once** to generate config and pick a port:
+   ```
+   python proxy.py
+   ```
+   The chosen port is written to `proxy_port.txt`. Leave the proxy
+   running; restart it whenever you edit `proxy_config.json`. (See
+   §Setup → step 2.)
+
+3. **Wire your client to it.** For Claude Code, add an `env` block to
+   `~/.claude/settings.json` — substitute the port from `proxy_port.txt`:
+   ```json
+   {
+     "env": {
+       "ANTHROPIC_BASE_URL": "http://127.0.0.1:49833"
+     }
+   }
+   ```
+   Restart `claude`. (See §Setup → step 3 for other clients and the
+   launcher scripts.)
+
+4. **Turn on the recall layer.** The default ships `inject.enabled: false`,
+   which leaves the DB write-only — stubs go in, the model never sees them
+   spliced back inline. Edit `proxy_config.json`:
+   ```json
+   "inject": { "enabled": true }
+   ```
+   Restart the proxy. (See §`inject` and §`inject()` in the proxy for what
+   this unlocks: pinned auto-injection and `[[recall: ...]]` markers.)
+
+5. **Register the MCP server** so the model can recall/archive/classify in
+   conversation without shelling out:
+   ```
+   claude mcp add --scope user memory-inject -- python /ABSOLUTE/PATH/memory-inject/mcp_server.py
+   ```
+   Optional but strongly recommended — without it every memory operation is
+   a `Bash` round-trip. (See §MCP server.)
+
+6. **Add the global orientation block** to `~/.claude/CLAUDE.md`. This is
+   what teaches every future session that the proxy exists, how to recall,
+   and the four MUST-rules (triage gate, per-kind discipline, triple-layer
+   rule persistence, DB-first). Without this, fresh sessions ignore the
+   archive entirely. See §"Setup: session orientation + the triage nudge"
+   → §1 for the verbatim block to paste.
+
+7. **Wire the triage hook** as a global `UserPromptSubmit` hook in
+   `~/.claude/settings.json`. Keeps the `unclassified` queue from rotting
+   into bulk work. See §"Setup: session orientation + the triage nudge"
+   → §2.
+
+8. **Smoke-test.** Open a fresh `claude` and ask "what's the memory-inject
+   proxy?". Two things should be true:
+   - the model's answer reflects the orientation block you just added —
+     proves `CLAUDE.md` loaded;
+   - `proxy.log` shows a new `transform` event for that request — proves
+     traffic is actually routed through the proxy.
+
+   If either is missing, `ANTHROPIC_BASE_URL` isn't reaching the client.
+
+The rest of this README explains *why* each piece exists and how to tune
+it. If you only ever read the Quickstart, the system still works.
+
+---
+
 ## Setup
 
 ### 1. Drop the directory somewhere
@@ -89,24 +161,44 @@ archives elided originals to `archive.jsonl`. Both are co-located with
 
 ### 3. Point your client at it
 
-Set the environment variable before launching the client:
+Set the environment variable before launching the client. The port lives
+in `proxy_port.txt` next to `proxy.py`:
 
 ```
 ANTHROPIC_BASE_URL=http://127.0.0.1:<port>
 ```
 
-For Claude Code specifically, this can go in the global settings file (look
-for the `env` block) or a per-shell export. Two launcher scripts ship with
-the proxy and set `ANTHROPIC_BASE_URL` for one spawned client process (and
-derive the project tag from `pwd` — see Project attribution below):
-`run-claude-proxied.sh` on macOS/Linux and `run-claude-proxied.ps1` on
-Windows. Run the one for your platform instead of `claude`.
+For Claude Code specifically, the recommended path is to pin it in the
+global settings file at `~/.claude/settings.json` so every `claude`
+invocation picks it up. Merge an `env` block alongside any existing keys
+(do not overwrite the file):
+
+```json
+{
+  "env": {
+    "ANTHROPIC_BASE_URL": "http://127.0.0.1:49833"
+  }
+}
+```
+
+A per-shell `export` also works for one-off invocations. Two launcher
+scripts ship with the proxy as a third option — they spawn one client
+process with `ANTHROPIC_BASE_URL` set AND derive the project tag from
+`pwd` (see Project attribution below): `run-claude-proxied.sh` on
+macOS/Linux and `run-claude-proxied.ps1` on Windows. Use them when you
+want per-launch project tagging without editing `settings.json`.
 
 ### 4. Verify it's wired
 
 Send any request from the client and check `proxy.log` — you should see
-matching `transform` and `response` events. If you don't, the env var isn't
-reaching the client process.
+matching `transform` and `response` events. If you don't, the env var
+isn't reaching the client process.
+
+A stronger smoke test (recommended after steps 5–7 of the Quickstart are
+also done): open a fresh `claude` and ask "what's the memory-inject
+proxy?". A correct answer is one that reflects the orientation block from
+`~/.claude/CLAUDE.md` — that confirms both routing *and* orientation,
+which is what you actually care about.
 
 ---
 
@@ -284,12 +376,19 @@ model and for whoever's running the system.
 
 ---
 
-## The DB layer (optional)
+## The DB layer (recommended)
 
-The proxy writes elided originals to `archive.jsonl` regardless. The DB layer
-is what makes that archive *queryable*. If you skip it, the proxy still
-prunes and the data is still recoverable from JSONL by hand; if you use it,
-you get FTS5 search, category tagging, pinning, and `inject()` recall.
+Technically optional — the proxy still prunes without it — but the
+"queryable system of record" promise the rest of this README makes
+*requires* the DB layer. Without it, elided originals are recoverable only
+by grepping `archive.jsonl` by hand, `inject()` recall is a no-op, and
+the MUST-rule "DB-first before deciding or asking" has nothing to query.
+Treat this section as part of normal setup.
+
+The proxy writes elided originals to `archive.jsonl` regardless. The DB
+layer is what makes that archive *queryable*: FTS5 search, category
+tagging, pinning, `inject()` recall, and the `memory.py` / MCP verbs all
+live here.
 
 ### Initial seed
 
@@ -300,6 +399,11 @@ python migrate.py
 Reads `archive.jsonl` from the proxy directory and seeds SQLite at
 `~/.claude/memory/archive.db` (override with `--db PATH` or
 `MEMORY_INJECT_DB`). Idempotent — re-run any time to catch up new rows.
+
+If you skipped this and started using the proxy first, that's fine —
+tee-writes (see below) have already populated the DB from fresh elisions.
+`migrate.py` is only required when you have a pre-existing `archive.jsonl`
+to import, or when rebuilding the DB after corruption.
 
 ### CLI
 
@@ -496,8 +600,11 @@ MUST-rules (non-negotiable, see memory-inject README "Required usage rules"):
 3. Triple-layer persistence: when the user establishes a rule ("from now on
    X", "always Y", "never Z"), persist it three ways — memory-index entry +
    dedicated detail file + a PINNED verbatim archive row of the user's words.
-4. DB-first: for questions about past decisions/discussions, run
-   memory.py recall BEFORE asking the user. Ask only if recall comes up empty.
+4. DB-first: BEFORE producing a non-trivial decision/recommendation OR
+   asking the user about past decisions/discussions, run memory.py recall
+   with several phrasings. Re-deriving without checking risks contradicting
+   a settled decision; re-asking burns the user's turn. Proceed only if
+   recall comes up empty.
 
 Session-start orientation (MANDATORY, before substantive work, regardless of
 what the user's first prompt asks): read the memory-inject README and the
@@ -592,16 +699,34 @@ deleted and the index entry typo'd, `recall` still surfaces the original
 directive intact. Skip the ceremony only for trivial preferences ("call me
 X"); anything behavioural gets all three layers.
 
-**Rule 4 — DB-first before asking the user.** For questions about past
-decisions, prior findings, or "did we discuss X" — query the archive
-**before** asking the user:
+**Rule 4 — DB-first before deciding *or* asking.** Two triggers, same
+discipline. Before either:
+
+(a) producing a non-trivial decision, recommendation, architectural
+    choice, or path forward, **or**
+(b) asking the user a question — especially "did we discuss X", "what was
+    the constraint on Y", "have we tried Z"
+
+— query the archive first:
 
 ```
 python3 /PATH/TO/memory-inject/memory.py recall --query='<terms>' --project=<project>
 ```
 
-Try several phrasings (synonyms, related concepts) before concluding the
-answer isn't there. The proxy archives far more than is visible in-context;
-a question the user already answered two sessions ago is usually one recall
-away, and re-asking it wastes the user's turn. Only fall back to asking when
-recall genuinely comes up empty.
+Try several phrasings (synonyms, related concepts, the inverse) before
+concluding the answer isn't there. The proxy archives far more than is
+visible in-context; the relevant prior row is usually one recall away.
+
+The (a) case is the more common failure mode and the more dangerous one.
+The model's instinct is to derive recommendations from scratch every
+session — but the archive often already contains the path the user chose,
+the path tried and abandoned (with the reason), or the constraint that
+rules out the obvious option. Re-deriving without checking risks
+contradicting a settled decision or re-litigating a debate the user
+already concluded. The (b) case is more obviously wasteful — re-asking
+something the user already answered burns their turn and reads as
+memoryless — but it's also more visible, so it tends to self-correct.
+The silent (a) case is what this rule is mostly defending against.
+
+Only proceed (decide or ask) when recall genuinely comes up empty across
+several phrasings.

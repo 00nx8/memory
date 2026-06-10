@@ -77,6 +77,41 @@ classification itself. The trigger is one of:
 3. Mid-session pruning is happening and content the proxy is about to elide
    looks load-bearing. Pre-archive before mechanical prune touches it.
 
+## When to recall
+
+Classification is the write side. This is the read side — and it's the
+one the model is most likely to skip. The archive is queryable, but
+nothing forces a query. Two triggers should reflexively cause a recall
+pass before the model proceeds:
+
+1. **Before producing a non-trivial decision, recommendation, or
+   architectural choice.** The instinct is to derive from scratch. Resist
+   it. Search the archive for prior work on the same topic — there may
+   already be a path the user chose, a path that was tried and abandoned
+   (with the reason), or a constraint that rules out the obvious option.
+   Contradicting a settled decision is worse than producing a slow one.
+
+2. **Before asking the user a question.** Especially "did we discuss X",
+   "what was the constraint on Y", "have we tried Z". The user answered
+   most of these in some prior session; re-asking burns their turn and
+   reads as memoryless.
+
+Mechanic. Use `memory.py recall` from the CLI, or the MCP `recall` verb
+if the server is wired. Try several phrasings — synonyms, related
+concepts, the inverse — before concluding the archive is empty on the
+topic. The proxy archives far more than is visible in-context.
+
+Calibration. False-positive cost (recalled rows that turn out
+irrelevant): small — skim and discard. False-negative cost (a relevant
+row that wasn't recalled): the model contradicts a settled decision or
+re-asks a settled question. Lean toward recalling.
+
+Caveat — staleness. A recalled row is a snapshot from when it was
+written. If it names a specific file, function, or flag, verify the
+referent still exists before acting on it. The archive is the historical
+record; the working tree is current truth. When the two disagree, trust
+the working tree and update or remove the stale row.
+
 ## Pinned context
 
 A small set of items are `pinned` in the session AND in the DB. Pinned items
