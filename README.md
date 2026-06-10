@@ -99,7 +99,23 @@ the section called out in parentheses.
    Restart the proxy. (See §`inject` and §`inject()` in the proxy for what
    this unlocks: pinned auto-injection and `[[recall: ...]]` markers.)
 
-5. **Register the MCP server** so the model can recall/archive/classify in
+5. **Tag this directory as a project.** Per-project pinned-context and
+   recall filtering key off the resolved project name, which defaults to
+   `misc` — and pinned-injection is suppressed entirely when project is
+   `misc` (it's the catch-all bucket, treated as too noisy to
+   auto-attach). The launcher scripts (`run-claude-proxied.{sh,ps1}`)
+   write a `current_project.txt` sidecar from `$PWD` on each invocation;
+   if you launch `claude` directly instead, write the sidecar yourself
+   once per project:
+   ```
+   echo memory-inject > current_project.txt
+   ```
+   The proxy reads it fresh per request, so no restart is needed and
+   `cd`-ing between projects between sessions just works. Without this,
+   every session looks like `misc` and per-project pinned rows never get
+   spliced in. (See §Project attribution.)
+
+6. **Register the MCP server** so the model can recall/archive/classify in
    conversation without shelling out:
    ```
    claude mcp add --scope user memory-inject -- python /ABSOLUTE/PATH/memory-inject/mcp_server.py
@@ -107,26 +123,31 @@ the section called out in parentheses.
    Optional but strongly recommended — without it every memory operation is
    a `Bash` round-trip. (See §MCP server.)
 
-6. **Add the global orientation block** to `~/.claude/CLAUDE.md`. This is
+7. **Add the global orientation block** to `~/.claude/CLAUDE.md`. This is
    what teaches every future session that the proxy exists, how to recall,
    and the four MUST-rules (triage gate, per-kind discipline, triple-layer
    rule persistence, DB-first). Without this, fresh sessions ignore the
    archive entirely. See §"Setup: session orientation + the triage nudge"
    → §1 for the verbatim block to paste.
 
-7. **Wire the triage hook** as a global `UserPromptSubmit` hook in
+8. **Wire the triage hook** as a global `UserPromptSubmit` hook in
    `~/.claude/settings.json`. Keeps the `unclassified` queue from rotting
    into bulk work. See §"Setup: session orientation + the triage nudge"
    → §2.
 
-8. **Smoke-test.** Open a fresh `claude` and ask "what's the memory-inject
-   proxy?". Two things should be true:
+9. **Smoke-test.** Open a fresh `claude` and ask "what's the memory-inject
+   proxy?". Three things should be true:
    - the model's answer reflects the orientation block you just added —
      proves `CLAUDE.md` loaded;
    - `proxy.log` shows a new `transform` event for that request — proves
-     traffic is actually routed through the proxy.
+     traffic is actually routed through the proxy;
+   - if you've pinned anything to this project (step 5 done + at least one
+     pinned row), the same `transform` event includes `"inject_pinned": N`
+     — proves project attribution is resolving past `misc`.
 
-   If either is missing, `ANTHROPIC_BASE_URL` isn't reaching the client.
+   If routing is missing, `ANTHROPIC_BASE_URL` isn't reaching the client.
+   If routing works but `inject_pinned` is absent on a project where you
+   know rows are pinned, the sidecar (step 5) wasn't written.
 
 The rest of this README explains *why* each piece exists and how to tune
 it. If you only ever read the Quickstart, the system still works.
@@ -450,6 +471,20 @@ request from these sources, in order:
 4. `payload.metadata.cwd` / `.project` (currently not populated by Claude
    Code, but reserved)
 5. Default: `misc`
+
+> **Direct-launch gotcha.** If you don't use the provided launcher (e.g.
+> you start Claude Code via the desktop shortcut, an IDE integration, or
+> `claude` straight from `PATH`), source 2 is never populated. Every
+> request falls all the way to source 5 (`misc`), which silently disables
+> per-project pinned-injection — `inject()` skips the pinned-recall
+> branch entirely when project is `misc`. The fix is one line per project
+> directory:
+>
+> ```
+> echo <projname> > current_project.txt
+> ```
+>
+> The proxy reads it fresh per request, no restart needed.
 
 The provided launcher scripts (`run-claude-proxied.sh` on macOS/Linux,
 `run-claude-proxied.ps1` on Windows) auto-derive the project from `pwd` —
