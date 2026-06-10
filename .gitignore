@@ -1,0 +1,7 @@
+archive.jsonl
+migrate_test.db
+proxy.log
+__pycache__/
+proxy_config.json
+proxy_port.txt
+current_project.txt
